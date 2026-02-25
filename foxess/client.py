@@ -1,0 +1,245 @@
+"""Fox ESS Cloud API client."""
+
+from __future__ import annotations
+
+import hashlib
+import time as time_module
+from datetime import date, datetime, timedelta, timezone
+
+import pandas as pd
+import requests
+
+import cache as _cache
+
+BASE_URL = "https://www.foxesscloud.com"
+
+# Variables to fetch from Fox ESS history endpoint
+HISTORY_VARIABLES = [
+    "loadsPower",        # home load (kW)
+    "meterPower2",       # AC-coupled solar / Gen Load (kW) — CT meter 2
+    "batChargePower",    # battery charging (kW)
+    "batDischargePower", # battery discharging (kW)
+    "gridConsumptionPower",  # grid import (kW)
+    "feedinPower",       # grid export (kW)
+    "SoC",               # battery state of charge (%)
+]
+
+
+class FoxESSClient:
+    """Client for the Fox ESS Cloud Open API (v0)."""
+
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "BESS-Dashboard/1.0",
+        })
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    def get_device_sn(self) -> str:
+        """Return the serial number of the first inverter on the account."""
+        payload = {"currentPage": 1, "pageSize": 10}
+        data = self._post("/op/v0/device/list", payload)
+        # Result can be a list directly, or a dict with a devices/deviceList key
+        if isinstance(data, list):
+            devices = data
+        elif isinstance(data, dict):
+            devices = (
+                data.get("devices")
+                or data.get("deviceList")
+                or data.get("data")
+                or data.get("list")
+                or []
+            )
+        else:
+            devices = []
+        if not devices:
+            raise RuntimeError(
+                f"No devices found on Fox ESS account. Raw response: {data}"
+            )
+        sn = devices[0]["deviceSN"]
+        model = devices[0].get("deviceType", "unknown")
+        print(f"  Fox ESS device: {model}  SN: {sn}")
+        return sn
+
+    def get_history(
+        self,
+        sn: str,
+        start: date,
+        end: date,
+        variables: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical data for *sn* between *start* and *end* (inclusive).
+
+        Queries one day at a time to stay within the 1 req/s rate limit and
+        avoid large response payloads.
+
+        Returns a DataFrame with columns:
+            time            datetime64[ns, Australia/Sydney]
+            loadsPower      float  kW
+            pvPower         float  kW
+            batChargePower  float  kW
+            batDischargePower float kW
+            gridConsumptionPower float kW
+            feedinPower     float  kW
+            SoC             float  %
+        """
+        if variables is None:
+            variables = HISTORY_VARIABLES
+
+        today = date.today()
+        all_frames: list[pd.DataFrame] = []
+        cursor = start
+        while cursor <= end:
+            cached = _cache.load("foxess", cursor)
+            if cached is not None and cursor < today:
+                print(f"  Fox ESS {cursor} ... cached ({len(cached)} rows)")
+                all_frames.append(cached)
+            else:
+                print(f"  Fox ESS {cursor} ...", end=" ")
+                begin_ms = _day_start_ms(cursor)
+                end_ms = _day_end_ms(cursor)
+                payload = {
+                    "sn": sn,
+                    "variables": variables,
+                    "begin": begin_ms,
+                    "end": end_ms,
+                }
+                try:
+                    data = self._post("/op/v0/device/history/query", payload)
+                    df = _parse_history(data, variables)
+                    print(f"{len(df)} rows")
+                    if cursor < today:
+                        _cache.save("foxess", cursor, df)
+                    if not df.empty:
+                        all_frames.append(df)
+                except Exception as exc:
+                    print(f"ERROR: {exc}")
+                time_module.sleep(1.1)  # stay within 1 req/s limit
+
+            cursor += timedelta(days=1)
+
+        if not all_frames:
+            return pd.DataFrame(columns=["time"] + variables)
+
+        result = pd.concat(all_frames, ignore_index=True)
+        # Normalise timezone representation: mixed pytz/zoneinfo offsets from
+        # cached vs freshly-fetched data cause concat to produce object dtype,
+        # which breaks resample(). Convert to UTC to get a consistent dtype.
+        result["time"] = pd.to_datetime(result["time"], utc=True)
+        result = result.sort_values("time").reset_index(drop=True)
+        return result
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _headers(self, path: str) -> dict:
+        timestamp = str(int(time_module.time() * 1000))
+        # Signature uses literal \r\n (4 chars), not actual CRLF — raw f-string required
+        raw = fr"{path}\r\n{self.api_key}\r\n{timestamp}"
+        signature = hashlib.md5(raw.encode("UTF-8")).hexdigest()
+        return {
+            "Token": self.api_key,
+            "Lang": "en",
+            "Timestamp": timestamp,
+            "Signature": signature,
+            "Content-Type": "application/json",
+        }
+
+    def _post(self, path: str, payload: dict) -> dict:
+        url = BASE_URL + path
+        resp = self.session.post(
+            url,
+            json=payload,
+            headers=self._headers(path),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        errno = body.get("errno", -1)
+        if errno != 0:
+            raise RuntimeError(
+                f"Fox ESS API error {errno}: {body.get('msg', body)}"
+            )
+        return body.get("result", body)
+
+
+# ------------------------------------------------------------------
+# Parsing helpers
+# ------------------------------------------------------------------
+
+def _day_start_ms(d: date) -> int:
+    """Midnight AEST/AEDT for the given date, as ms UTC timestamp."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Australia/Sydney")
+    dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+    return int(dt.timestamp() * 1000)
+
+
+def _day_end_ms(d: date) -> int:
+    """23:59:59 AEST/AEDT for the given date, as ms UTC timestamp."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Australia/Sydney")
+    dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz)
+    return int(dt.timestamp() * 1000)
+
+
+def _parse_history(data: dict | list, variables: list[str]) -> pd.DataFrame:
+    """
+    Convert the raw Fox ESS history response into a tidy wide DataFrame.
+
+    Response shape: result is a list with one item containing a 'datas' list.
+    Each datas entry has: variable, unit, data=[{time: str, value: float}].
+    Times are strings like '2026-02-23 00:02:38 AEDT+1100'.
+    """
+    import re
+
+    # Unwrap outer list → dict with 'datas'
+    if isinstance(data, list):
+        if not data:
+            return pd.DataFrame()
+        data = data[0]
+
+    series_list = data.get("datas", []) if isinstance(data, dict) else []
+    if not series_list:
+        return pd.DataFrame()
+
+    frames: dict[str, pd.Series] = {}
+    for series in series_list:
+        var = series.get("variable", "")
+        points = series.get("data", [])
+        if not var or not points:
+            continue
+
+        times = [_parse_fox_time(p["time"]) for p in points]
+        values = [p.get("value", float("nan")) for p in points]
+        frames[var] = pd.Series(values, index=times, name=var)
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(frames)
+    df.index.name = "time"
+    df = df.reset_index()
+    # Ensure all requested variables are present (fill missing with NaN)
+    for v in variables:
+        if v not in df.columns:
+            df[v] = float("nan")
+
+    return df
+
+
+def _parse_fox_time(s: str):
+    """
+    Parse Fox ESS time strings like '2026-02-23 00:02:38 AEDT+1100'.
+    Strips the timezone abbreviation (AEDT/AEST) and uses the numeric offset.
+    """
+    import re
+    # Remove timezone abbreviation before the +/- offset: 'AEDT+1100' -> '+1100'
+    clean = re.sub(r"\s+[A-Z]{2,5}(?=[+-])", " ", s)
+    return datetime.strptime(clean, "%Y-%m-%d %H:%M:%S %z")
