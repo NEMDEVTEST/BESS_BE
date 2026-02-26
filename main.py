@@ -5,7 +5,7 @@ Fetches data from Amber Electric and Fox ESS, caches in PostgreSQL,
 and renders an interactive Plotly dashboard as a standalone HTML file.
 
 Usage:
-    python main.py [--start DATE] [--end DATE] [--update] [--out PATH]
+    python main.py [--start DATE] [--end DATE] [--update] [--no-open] [--out PATH]
 
 Examples:
     python main.py --update                              # update DB, dashboard last 30d
@@ -41,7 +41,8 @@ def main() -> None:
     parser.add_argument("--start", type=date.fromisoformat, default=None, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=date.fromisoformat, default=None, help="End date (YYYY-MM-DD)")
     parser.add_argument("--update", action="store_true", help="Fetch latest data from APIs before querying")
-    parser.add_argument("--out", type=str, default="output/dashboard.html", help="Output HTML path")
+    parser.add_argument("--no-open", action="store_true", help="Skip opening browser (for headless/scheduled runs)")
+    parser.add_argument("--out", type=str, default="docs/index.html", help="Output HTML path")
     args = parser.parse_args()
 
     amber_token = os.environ.get("AMBER_API_TOKEN")
@@ -112,8 +113,9 @@ def main() -> None:
     print("\n>> Building dashboard ...")
     out_path = build_dashboard(df, output_path=args.out, theme="sharp")
 
-    print("\n>> Opening in browser ...")
-    webbrowser.open(out_path.resolve().as_uri())
+    if not args.no_open:
+        print("\n>> Opening in browser ...")
+        webbrowser.open(out_path.resolve().as_uri())
     print("\nDone.\n")
 
 
