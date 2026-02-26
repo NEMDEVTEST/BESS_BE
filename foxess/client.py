@@ -9,8 +9,6 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 import requests
 
-import cache as _cache
-
 BASE_URL = "https://www.foxesscloud.com"
 
 # Variables to fetch from Fox ESS history endpoint
@@ -65,7 +63,7 @@ class FoxESSClient:
         print(f"  Fox ESS device: {model}  SN: {sn}")
         return sn
 
-    def get_history(
+    def fetch(
         self,
         sn: str,
         start: date,
@@ -74,64 +72,47 @@ class FoxESSClient:
     ) -> pd.DataFrame:
         """
         Fetch historical data for *sn* between *start* and *end* (inclusive).
+        Loops day-by-day (API rate limit). No cache logic — pure API fetch.
 
-        Queries one day at a time to stay within the 1 req/s rate limit and
-        avoid large response payloads.
-
-        Returns a DataFrame with columns:
-            time            datetime64[ns, Australia/Sydney]
-            loadsPower      float  kW
-            pvPower         float  kW
-            batChargePower  float  kW
-            batDischargePower float kW
-            gridConsumptionPower float kW
-            feedinPower     float  kW
-            SoC             float  %
+        Returns a DataFrame with columns (naive Brisbane time):
+            dt          datetime64[ns]  (Brisbane UTC+10, no tz)
+            home_load   float  kW
+            solar       float  kW
+            soc         float  %
         """
         if variables is None:
             variables = HISTORY_VARIABLES
 
-        today = date.today()
         all_frames: list[pd.DataFrame] = []
         cursor = start
         while cursor <= end:
-            cached = _cache.load("foxess", cursor)
-            if cached is not None and cursor < today:
-                print(f"  Fox ESS {cursor} ... cached ({len(cached)} rows)")
-                all_frames.append(cached)
-            else:
-                print(f"  Fox ESS {cursor} ...", end=" ")
-                begin_ms = _day_start_ms(cursor)
-                end_ms = _day_end_ms(cursor)
-                payload = {
-                    "sn": sn,
-                    "variables": variables,
-                    "begin": begin_ms,
-                    "end": end_ms,
-                }
-                try:
-                    data = self._post("/op/v0/device/history/query", payload)
-                    df = _parse_history(data, variables)
-                    print(f"{len(df)} rows")
-                    if cursor < today:
-                        _cache.save("foxess", cursor, df)
-                    if not df.empty:
-                        all_frames.append(df)
-                except Exception as exc:
-                    print(f"ERROR: {exc}")
-                time_module.sleep(1.1)  # stay within 1 req/s limit
-
+            print(f"  Fox ESS {cursor} ...", end=" ")
+            begin_ms = _day_start_ms(cursor)
+            end_ms = _day_end_ms(cursor)
+            payload = {
+                "sn": sn,
+                "variables": variables,
+                "begin": begin_ms,
+                "end": end_ms,
+            }
+            try:
+                data = self._post("/op/v0/device/history/query", payload)
+                df = _parse_history(data, variables)
+                df = _to_brisbane_naive(df)
+                print(f"{len(df)} rows")
+                if not df.empty:
+                    all_frames.append(df)
+            except Exception as exc:
+                print(f"ERROR: {exc}")
+            time_module.sleep(1.1)  # stay within 1 req/s limit
             cursor += timedelta(days=1)
 
         if not all_frames:
-            return pd.DataFrame(columns=["time"] + variables)
+            return pd.DataFrame(columns=["dt", "home_load", "solar", "soc"])
 
         result = pd.concat(all_frames, ignore_index=True)
-        # Normalise timezone representation: mixed pytz/zoneinfo offsets from
-        # cached vs freshly-fetched data cause concat to produce object dtype,
-        # which breaks resample(). Convert to UTC to get a consistent dtype.
-        result["time"] = pd.to_datetime(result["time"], utc=True)
-        result = result.sort_values("time").reset_index(drop=True)
+        result["dt"] = pd.to_datetime(result["dt"])
+        result = result.sort_values("dt").reset_index(drop=True)
         return result
 
     # ------------------------------------------------------------------
@@ -187,6 +168,34 @@ def _day_end_ms(d: date) -> int:
     tz = ZoneInfo("Australia/Sydney")
     dt = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz)
     return int(dt.timestamp() * 1000)
+
+
+# Column rename mapping: Fox ESS API name → database name
+_RENAME = {
+    "time": "dt",
+    "loadsPower": "home_load",
+    "meterPower2": "solar",
+    "SoC": "soc",
+}
+
+
+def _to_brisbane_naive(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert tz-aware 'dt' column to naive Brisbane (UTC+10) time, rename cols."""
+    if df.empty:
+        return df
+
+    # Rename columns
+    df = df.rename(columns=_RENAME)
+
+    # Keep only the columns we care about
+    keep = [c for c in ["dt", "home_load", "solar", "soc"] if c in df.columns]
+    df = df[keep].copy()
+
+    # Convert to Brisbane (fixed UTC+10, no DST) then strip tz
+    from zoneinfo import ZoneInfo
+    brisbane = ZoneInfo("Australia/Brisbane")
+    df["dt"] = pd.to_datetime(df["dt"], utc=True).dt.tz_convert(brisbane).dt.tz_localize(None)
+    return df
 
 
 def _parse_history(data: dict | list, variables: list[str]) -> pd.DataFrame:

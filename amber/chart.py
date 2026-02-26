@@ -69,8 +69,7 @@ THEMES: dict[str, dict] = {
 
 
 def build_dashboard(
-    amber_df: pd.DataFrame,
-    fox_df: pd.DataFrame,
+    df: pd.DataFrame,
     output_path: str | Path = "output/dashboard.html",
     theme: str = "sharp",
 ) -> Path:
@@ -79,8 +78,8 @@ def build_dashboard(
 
     Parameters
     ----------
-    amber_df    : DataFrame from AmberClient.get_usage()
-    fox_df      : DataFrame from FoxESSClient.get_history()
+    df          : Unified DataFrame with columns:
+                  dt, grid_export, grid_import, price, home_load, solar, soc
     output_path : Destination for the self-contained HTML file.
     theme       : One of 'sharp', 'synthwave', 'glacier', 'inferno'.
     """
@@ -90,27 +89,28 @@ def build_dashboard(
     t = THEMES.get(theme, THEMES["sharp"])
 
     # ------------------------------------------------------------------
-    # Amber — convert kWh per 5-min interval to kW (power)
-    # kW = kWh / (5/60) = kWh * 12
+    # Amber traces — grid import/export and price
     # ------------------------------------------------------------------
-    AMBER_FACTOR = 12.0   # kWh per 5-min → kW
+    amber = df[["dt", "grid_export", "grid_import", "price"]].dropna(
+        subset=["grid_export", "grid_import", "price"], how="all"
+    ).set_index("dt").sort_index()
 
-    general = amber_df[amber_df["channel_type"] == "general"].set_index("time")
-    feedin  = amber_df[amber_df["channel_type"] == "feedIn"].set_index("time")
-
-    price_series = general["spot_per_kwh"]
-    export_kw    = feedin["kwh"]   * AMBER_FACTOR   # positive
-    import_kw    = -general["kwh"] * AMBER_FACTOR   # negative
+    price_series = amber["price"]
+    export_kw    = amber["grid_export"]           # positive
+    import_kw    = -amber["grid_import"]           # negative (for chart)
+    import_abs   = amber["grid_import"]            # positive (for hover)
 
     # ------------------------------------------------------------------
-    # Fox ESS — already in kW; resample to 5-min mean to align with Amber
+    # Fox ESS traces — home load, solar, SoC; resample to 5-min
     # ------------------------------------------------------------------
-    fox = fox_df.set_index("time").sort_index()
+    fox = df[["dt", "home_load", "solar", "soc"]].dropna(
+        subset=["home_load", "solar", "soc"], how="all"
+    ).set_index("dt").sort_index()
     fox_5min = fox.resample("5min").mean()
 
-    load_kw  = fox_5min["loadsPower"]
-    solar_kw = fox_5min["meterPower2"]   # AC-coupled Gen Load
-    soc      = fox_5min["SoC"]
+    load_kw  = fox_5min["home_load"]
+    solar_kw = fox_5min["solar"]
+    soc      = fox_5min["soc"]
 
     # ------------------------------------------------------------------
     # Figure
@@ -149,7 +149,7 @@ def build_dashboard(
                 "%{x|%d %b %Y %H:%M}<br>"
                 "%{customdata:.2f} kW<extra></extra>"
             ),
-            customdata=(general["kwh"] * AMBER_FACTOR).values,
+            customdata=import_abs.values,
         ),
         secondary_y=False,
     )
@@ -230,8 +230,8 @@ def build_dashboard(
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
-    t_min = amber_df["time"].min().strftime("%d %b %Y")
-    t_max = amber_df["time"].max().strftime("%d %b %Y")
+    t_min = df["dt"].min().strftime("%d %b %Y")
+    t_max = df["dt"].max().strftime("%d %b %Y")
 
     fig.update_layout(
         title=dict(

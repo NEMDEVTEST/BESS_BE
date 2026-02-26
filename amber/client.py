@@ -8,9 +8,10 @@ from datetime import date, timedelta
 import pandas as pd
 import requests
 
-import cache as _cache
-
 BASE_URL = "https://api.amber.com.au/v1"
+
+# Amber kWh per 5-min → kW
+_AMBER_FACTOR = 12.0
 
 
 class AmberClient:
@@ -34,7 +35,7 @@ class AmberClient:
         print(f"  Site: NMI {site['nmi']} | Network: {site['network']} | ID: {site['id']}")
         return site["id"]
 
-    def get_usage(
+    def fetch(
         self,
         site_id: str,
         start: date,
@@ -42,46 +43,37 @@ class AmberClient:
     ) -> pd.DataFrame:
         """
         Fetch usage for every channel between *start* and *end* (inclusive).
-        Past days are served from the local parquet cache; only missing or
-        today's data is fetched from the API.
+        Loops day-by-day (API limitation). No cache logic — pure API fetch.
 
-        Returns a DataFrame with columns:
-            time            datetime64[ns, Australia/Sydney]
-            channel_type    'general' | 'feedIn'
-            channel_id      'E1' | 'B1'
-            kwh             float
-            spot_per_kwh    float   (c/kWh, wholesale spot)
-            per_kwh         float   (c/kWh, Amber all-in tariff)
-            cost            float   (cents)
-            descriptor      str
+        Returns a DataFrame with columns (naive Brisbane time):
+            dt              datetime64[ns]  (Brisbane UTC+10, no tz)
+            grid_export     float  kW
+            grid_import     float  kW
+            price           float  c/kWh (spot)
         """
-        today = date.today()
         frames: list[pd.DataFrame] = []
         cursor = start
 
         while cursor <= end:
-            cached = _cache.load("amber", cursor)
-            if cached is not None and cursor < today:
-                print(f"  Amber {cursor} ... cached ({len(cached)} rows)")
-                frames.append(cached)
-            else:
-                print(f"  Amber {cursor} ... fetching", end=" ")
-                raw = self._get(
-                    f"/sites/{site_id}/usage",
-                    params={"startDate": str(cursor), "endDate": str(cursor)},
-                )
-                df = self._parse_usage(raw)
-                print(f"({len(df)} rows)")
-                if cursor < today:
-                    _cache.save("amber", cursor, df)
-                frames.append(df)
-                time.sleep(0.2)
-
+            print(f"  Amber {cursor} ... fetching", end=" ")
+            raw = self._get(
+                f"/sites/{site_id}/usage",
+                params={"startDate": str(cursor), "endDate": str(cursor)},
+            )
+            df = _parse_and_pivot(raw)
+            print(f"({len(df)} rows)")
+            frames.append(df)
+            time.sleep(0.2)
             cursor += timedelta(days=1)
 
+        # Drop empty frames to avoid FutureWarning on concat with all-NA columns
+        frames = [f for f in frames if not f.empty]
         if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
+            return pd.DataFrame(columns=["dt", "grid_export", "grid_import", "price"])
+        result = pd.concat(frames, ignore_index=True)
+        result["dt"] = pd.to_datetime(result["dt"])
+        result = result.sort_values("dt").reset_index(drop=True)
+        return result
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -93,29 +85,44 @@ class AmberClient:
         resp.raise_for_status()
         return resp.json()
 
-    @staticmethod
-    def _parse_usage(records: list[dict]) -> pd.DataFrame:
-        if not records:
-            return pd.DataFrame()
 
-        rows = []
-        for r in records:
-            rows.append(
-                {
-                    "time": r["nemTime"],
-                    "channel_type": r["channelType"],
-                    "channel_id": r["channelIdentifier"],
-                    "kwh": float(r["kwh"]),
-                    "spot_per_kwh": float(r.get("spotPerKwh", 0)),
-                    "per_kwh": float(r.get("perKwh", 0)),
-                    "cost": float(r.get("cost", 0)),
-                    "descriptor": r.get("descriptor", ""),
-                }
-            )
+def _parse_and_pivot(records: list[dict]) -> pd.DataFrame:
+    """Parse raw Amber usage records, pivot channels into columns.
 
-        df = pd.DataFrame(rows)
-        df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert(
-            "Australia/Sydney"
-        )
-        df = df.sort_values("time").reset_index(drop=True)
-        return df
+    Returns: dt, grid_export (kW), grid_import (kW), price (c/kWh spot).
+    All timestamps are naive Brisbane (UTC+10).
+    """
+    if not records:
+        return pd.DataFrame(columns=["dt", "grid_export", "grid_import", "price"])
+
+    from zoneinfo import ZoneInfo
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    rows = []
+    for r in records:
+        rows.append({
+            "time": r["nemTime"],
+            "channel_type": r["channelType"],
+            "kwh": float(r["kwh"]),
+            "spot_per_kwh": float(r.get("spotPerKwh", 0)),
+        })
+
+    raw = pd.DataFrame(rows)
+    raw["time"] = pd.to_datetime(raw["time"], utc=True).dt.tz_convert(brisbane).dt.tz_localize(None)
+
+    general = raw[raw["channel_type"] == "general"].set_index("time")
+    feedin = raw[raw["channel_type"] == "feedIn"].set_index("time")
+
+    pivot = pd.DataFrame({
+        "grid_import": general["kwh"] * _AMBER_FACTOR,
+        "price": general["spot_per_kwh"],
+    })
+
+    if not feedin.empty:
+        pivot["grid_export"] = feedin["kwh"] * _AMBER_FACTOR
+    else:
+        pivot["grid_export"] = float("nan")
+
+    pivot = pivot.reset_index().rename(columns={"time": "dt"})
+    pivot = pivot[["dt", "grid_export", "grid_import", "price"]]
+    return pivot.sort_values("dt").reset_index(drop=True)
