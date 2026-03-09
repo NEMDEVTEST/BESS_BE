@@ -105,7 +105,7 @@ def build_forecast_dashboard(
     fig = make_subplots(
         rows=4, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.05,
+        vertical_spacing=0.08,
         row_heights=[0.25, 0.25, 0.25, 0.25],
         subplot_titles=("Battery SoC (%)", "Price (c/kWh)", "Solar (kW)", "Load (kW)"),
     )
@@ -283,21 +283,18 @@ def build_forecast_dashboard(
     # ------------------------------------------------------------------
     axis_common = dict(gridcolor=t["grid"], linecolor=t["zero"], zerolinecolor=t["zero"])
 
+    _font_family = "Söhne, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif"
+
     fig.update_layout(
-        title=dict(
-            text="<b>BESS Forecast Dashboard</b>",
-            x=0.02,
-            font=dict(size=18),
-        ),
         plot_bgcolor=t["plot_bg"],
         paper_bgcolor=t["bg"],
-        font=dict(color="#E8EAF6", family="'SF Mono', 'Fira Code', 'Consolas', monospace"),
+        font=dict(color="#E8EAF6", family=_font_family),
         legend=dict(
             orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
+            yanchor="top",
+            y=-0.06,
+            xanchor="center",
+            x=0.5,
             bgcolor="rgba(0,0,0,0.6)",
             bordercolor=t["zero"],
             borderwidth=1,
@@ -307,14 +304,13 @@ def build_forecast_dashboard(
         xaxis2=dict(gridcolor=t["grid"], showgrid=True, linecolor=t["zero"]),
         xaxis3=dict(gridcolor=t["grid"], showgrid=True, linecolor=t["zero"]),
         xaxis4=dict(
-            title="Time (AEST/AEDT)",
             gridcolor=t["grid"], showgrid=True, linecolor=t["zero"],
         ),
         yaxis=dict(title="%", range=[0, 100], **axis_common),
         yaxis2=dict(title="c/kWh", **axis_common),
         yaxis3=dict(title="kW", **axis_common),
         yaxis4=dict(title="kW", **axis_common),
-        margin=dict(t=100, b=60, l=70, r=40),
+        margin=dict(t=40, b=80, l=70, r=40),
         height=1100,
     )
 

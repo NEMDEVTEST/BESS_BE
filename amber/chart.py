@@ -291,31 +291,22 @@ def build_dashboard(
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
-    t_min = df["dt"].min().strftime("%d %b %Y")
-    t_max = df["dt"].max().strftime("%d %b %Y")
-
     axis_common = dict(gridcolor=t["grid"], linecolor=t["zero"], zerolinecolor=t["zero"])
 
+    _font_family = "Söhne, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif"
+
     fig.update_layout(
-        title=dict(
-            text=(
-                f"<b>BESS Dashboard</b>  [{t['name']}]  ·  {t_min} to {t_max}<br>"
-                "<sup style='color:#666'>"
-            ),
-            x=0.02,
-            font=dict(size=18),
-        ),
         barmode="overlay",
         bargap=0,
         plot_bgcolor=t["plot_bg"],
         paper_bgcolor=t["bg"],
-        font=dict(color="#E8EAF6", family="'SF Mono', 'Fira Code', 'Consolas', monospace"),
+        font=dict(color="#E8EAF6", family=_font_family),
         legend=dict(
             orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
+            yanchor="top",
+            y=-0.15,
+            xanchor="center",
+            x=0.5,
             bgcolor="rgba(0,0,0,0.6)",
             bordercolor=t["zero"],
             borderwidth=1,
@@ -326,6 +317,10 @@ def build_dashboard(
             gridcolor=t["grid"],
             showgrid=True,
             linecolor=t["zero"],
+            range=[
+                (df["dt"].max() - pd.Timedelta(days=7)).isoformat(),
+                df["dt"].max().isoformat(),
+            ],
             rangeselector=dict(
                 buttons=[
                     dict(count=1,  label="1d",  step="day", stepmode="backward"),
@@ -347,13 +342,11 @@ def build_dashboard(
             showgrid=True,
             linecolor=t["zero"],
         ),
-        # Row 3 x-axis (bottom chart — gets the range slider + label)
+        # Row 3 x-axis (bottom chart)
         xaxis3=dict(
-            title="Time (AEST/AEDT)",
             gridcolor=t["grid"],
             showgrid=True,
             linecolor=t["zero"],
-            rangeslider=dict(visible=True, thickness=0.08, bgcolor=t["bg"]),
         ),
         # Row 1 primary y-axis
         yaxis=dict(
@@ -395,7 +388,7 @@ def build_dashboard(
             tickfont=dict(color="#06D6A0"),
             linecolor=t["zero"],
         ),
-        margin=dict(t=120, b=60, l=70, r=110),
+        margin=dict(t=40, b=80, l=70, r=110),
         height=1000,
     )
 
