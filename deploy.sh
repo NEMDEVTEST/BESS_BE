@@ -13,7 +13,7 @@ find "$LOG_DIR" -name "deploy_*.log" -mtime +5 -delete
 
     python main.py --update --no-open
 
-    git add docs/index.html
+    git add docs/index.html docs/forecast.html
     if git diff --cached --quiet; then
         echo "No changes to commit."
     else

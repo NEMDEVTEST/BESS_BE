@@ -75,6 +75,18 @@ class AmberClient:
         result = result.sort_values("dt").reset_index(drop=True)
         return result
 
+    def fetch_price_forecast(self, site_id: str, next_intervals: int = 48) -> pd.DataFrame:
+        """Fetch current + forecast price intervals.
+
+        Returns DataFrame with columns (naive Brisbane time):
+            dt, price_forecast, price_low, price_high, channel_type, descriptor, renewables
+        """
+        raw = self._get(
+            f"/sites/{site_id}/prices/current",
+            params={"resolution": "30", "next": next_intervals},
+        )
+        return _parse_price_forecast(raw)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -126,3 +138,28 @@ def _parse_and_pivot(records: list[dict]) -> pd.DataFrame:
     pivot = pivot.reset_index().rename(columns={"time": "dt"})
     pivot = pivot[["dt", "grid_export", "grid_import", "price"]]
     return pivot.sort_values("dt").reset_index(drop=True)
+
+
+def _parse_price_forecast(records: list[dict]) -> pd.DataFrame:
+    """Parse Amber current + forecast price intervals."""
+    from zoneinfo import ZoneInfo
+    brisbane = ZoneInfo("Australia/Brisbane")
+
+    rows = []
+    for r in records:
+        if r.get("channelType") != "general":
+            continue
+        dt = pd.Timestamp(r["nemTime"]).tz_convert(brisbane).tz_localize(None)
+        adv = r.get("advancedPrice", {})
+        rows.append({
+            "dt": dt,
+            "type": r["type"],
+            "price_forecast": float(r.get("spotPerKwh", 0)),
+            "price_low": float(adv.get("low", r.get("spotPerKwh", 0))),
+            "price_high": float(adv.get("high", r.get("spotPerKwh", 0))),
+            "descriptor": r.get("descriptor", ""),
+            "renewables": float(r.get("renewables", 0)),
+        })
+
+    df = pd.DataFrame(rows)
+    return df.sort_values("dt").reset_index(drop=True)

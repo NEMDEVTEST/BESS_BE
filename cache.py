@@ -27,20 +27,33 @@ def _get_engine():
 
 
 def _ensure_table(engine) -> None:
-    ddl = text("""
-        CREATE TABLE IF NOT EXISTS energy (
-            dt              TIMESTAMP PRIMARY KEY,
-            grid_export     DOUBLE PRECISION,
-            grid_import     DOUBLE PRECISION,
-            price           DOUBLE PRECISION,
-            home_load       DOUBLE PRECISION,
-            solar           DOUBLE PRECISION,
-            soc             DOUBLE PRECISION,
-            uploaded_at     TIMESTAMP DEFAULT NOW()
-        )
-    """)
     with engine.begin() as conn:
-        conn.execute(ddl)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS energy (
+                dt              TIMESTAMP PRIMARY KEY,
+                grid_export     DOUBLE PRECISION,
+                grid_import     DOUBLE PRECISION,
+                price           DOUBLE PRECISION,
+                home_load       DOUBLE PRECISION,
+                solar           DOUBLE PRECISION,
+                soc             DOUBLE PRECISION,
+                uploaded_at     TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS forecasts (
+                fetched_at      TIMESTAMP NOT NULL,
+                dt              TIMESTAMP NOT NULL,
+                source          TEXT NOT NULL,
+                price_forecast  DOUBLE PRECISION,
+                price_low       DOUBLE PRECISION,
+                price_high      DOUBLE PRECISION,
+                pv_estimate     DOUBLE PRECISION,
+                pv_estimate10   DOUBLE PRECISION,
+                pv_estimate90   DOUBLE PRECISION,
+                PRIMARY KEY (fetched_at, dt, source)
+            )
+        """))
 
 
 def load(start: date, end: date) -> pd.DataFrame:
@@ -90,6 +103,62 @@ def save_bulk(source: str, df: pd.DataFrame) -> None:
 
     with _get_engine().begin() as conn:
         conn.execute(sql, rows)
+
+
+def save_forecast(source: str, df: pd.DataFrame) -> None:
+    """Save forecast data with a fetch timestamp."""
+    if df.empty:
+        return
+
+    now = datetime.now().replace(microsecond=0)
+
+    col_map = {
+        "amber": ["price_forecast", "price_low", "price_high"],
+        "solcast": ["pv_estimate", "pv_estimate10", "pv_estimate90"],
+    }
+    cols = col_map[source]
+    keep = ["dt"] + [c for c in cols if c in df.columns]
+    insert_df = df[keep].copy()
+    insert_df["fetched_at"] = now
+    insert_df["source"] = source
+
+    col_names = ["fetched_at", "dt", "source"] + [c for c in cols if c in df.columns]
+    placeholders = ", ".join(f":{c}" for c in col_names)
+    col_list = ", ".join(col_names)
+
+    sql = text(f"INSERT INTO forecasts ({col_list}) VALUES ({placeholders}) ON CONFLICT DO NOTHING")
+
+    rows = []
+    for _, row in insert_df.iterrows():
+        params = {"fetched_at": now, "dt": row["dt"], "source": source}
+        for c in cols:
+            if c in row:
+                val = row[c]
+                params[c] = None if pd.isna(val) else float(val)
+        rows.append(params)
+
+    with _get_engine().begin() as conn:
+        conn.execute(sql, rows)
+
+
+def load_latest_forecast(source: str) -> pd.DataFrame:
+    """Load the most recent forecast for a given source."""
+    col_map = {
+        "amber": "price_forecast, price_low, price_high",
+        "solcast": "pv_estimate, pv_estimate10, pv_estimate90",
+    }
+    cols = col_map[source]
+    sql = text(f"""
+        SELECT dt, {cols}, fetched_at
+        FROM forecasts
+        WHERE source = :source
+          AND fetched_at = (SELECT MAX(fetched_at) FROM forecasts WHERE source = :source)
+        ORDER BY dt
+    """)
+    df = pd.read_sql(sql, _get_engine(), params={"source": source})
+    if not df.empty:
+        df["dt"] = pd.to_datetime(df["dt"])
+    return df
 
 
 def latest_dt(source: str) -> datetime | None:

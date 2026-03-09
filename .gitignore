@@ -18,6 +18,7 @@ logs/
 output/
 *.html
 !docs/index.html
+!docs/forecast.html
 
 # Cache
 cache/

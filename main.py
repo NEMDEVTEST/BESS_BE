@@ -14,9 +14,11 @@ Examples:
     python main.py                                        # DB-only, last 30 days
 
 Environment (set in .env):
-    AMBER_API_TOKEN   Amber Electric personal access key
-    FOXESS_API_KEY    Fox ESS Cloud API key
-    DATABASE_URL      PostgreSQL connection string
+    AMBER_API_TOKEN      Amber Electric personal access key
+    FOXESS_API_KEY       Fox ESS Cloud API key
+    DATABASE_URL         PostgreSQL connection string
+    SOLCAST_API_KEY      Solcast rooftop API key
+    SOLCAST_RESOURCE_ID  Solcast site resource ID
 """
 
 from __future__ import annotations
@@ -24,14 +26,15 @@ from __future__ import annotations
 import argparse
 import os
 import webbrowser
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 import cache
-from amber import AmberClient, build_dashboard
+from amber import AmberClient, build_dashboard, build_forecast_dashboard
 from foxess import FoxESSClient
+from solcast import SolcastClient
 
 
 def main() -> None:
@@ -47,6 +50,8 @@ def main() -> None:
 
     amber_token = os.environ.get("AMBER_API_TOKEN")
     foxess_key = os.environ.get("FOXESS_API_KEY")
+    solcast_key = os.environ.get("SOLCAST_API_KEY")
+    solcast_rid = os.environ.get("SOLCAST_RESOURCE_ID")
 
     if not amber_token:
         raise SystemExit("AMBER_API_TOKEN not set in .env")
@@ -66,13 +71,15 @@ def main() -> None:
     print(f"Output : {args.out}")
     print()
 
+    amber = AmberClient(api_token=amber_token)
+    site_id = None
+
     # ------------------------------------------------------------------
     # Update: fetch missing data from APIs and write to DB
     # ------------------------------------------------------------------
     if args.update:
         # --- Amber ---
         print(">> Amber: getting site info ...")
-        amber = AmberClient(api_token=amber_token)
         site_id = amber.get_site_id()
 
         latest = cache.latest_dt("amber")
@@ -95,6 +102,24 @@ def main() -> None:
         cache.save_bulk("foxess", fox_df)
         print(f"  Saved {len(fox_df)} rows to DB")
 
+        # --- Amber price forecast ---
+        print("\n>> Amber: fetching price forecast ...")
+        if site_id is None:
+            site_id = amber.get_site_id()
+        price_fc = amber.fetch_price_forecast(site_id)
+        cache.save_forecast("amber", price_fc)
+        print(f"  Saved {len(price_fc)} forecast intervals")
+
+        # --- Solcast solar forecast ---
+        if solcast_key and solcast_rid:
+            print("\n>> Solcast: fetching solar forecast ...")
+            solcast = SolcastClient(api_key=solcast_key, resource_id=solcast_rid)
+            solar_fc = solcast.fetch_forecasts(hours=48)
+            cache.save_forecast("solcast", solar_fc)
+            print(f"  Saved {len(solar_fc)} forecast intervals")
+        else:
+            print("\n>> Solcast: skipped (SOLCAST_API_KEY / SOLCAST_RESOURCE_ID not set)")
+
     # ------------------------------------------------------------------
     # Query: load full range from DB
     # ------------------------------------------------------------------
@@ -108,10 +133,28 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # Build dashboard
+    # Build main dashboard
     # ------------------------------------------------------------------
     print("\n>> Building dashboard ...")
     out_path = build_dashboard(df, output_path=args.out, theme="sharp")
+
+    # ------------------------------------------------------------------
+    # Build forecast dashboard
+    # ------------------------------------------------------------------
+    print("\n>> Building forecast dashboard ...")
+    yesterday = datetime.now() - timedelta(hours=24)
+    actuals_24h = cache.load(yesterday.date(), today)
+
+    price_fc = cache.load_latest_forecast("amber")
+    solar_fc = cache.load_latest_forecast("solcast")
+
+    forecast_path = build_forecast_dashboard(
+        actuals=actuals_24h,
+        price_forecast=price_fc,
+        solar_forecast=solar_fc,
+        output_path="docs/forecast.html",
+        theme="sharp",
+    )
 
     if not args.no_open:
         print("\n>> Opening in browser ...")
