@@ -11,6 +11,9 @@ build/
 venv/
 env/
 
+# Logs
+logs/
+
 # Output
 output/
 *.html
