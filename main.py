@@ -110,13 +110,17 @@ def main() -> None:
         cache.save_forecast("amber", price_fc)
         print(f"  Saved {len(price_fc)} forecast intervals")
 
-        # --- Solcast solar forecast ---
-        if solcast_key and solcast_rid:
+        # --- Solcast solar forecast (2x/day at 6am and 12pm to stay within 10 calls/day) ---
+        hour = datetime.now().hour
+        has_forecast = not cache.load_latest_forecast("solcast").empty
+        if solcast_key and solcast_rid and (hour in (6, 12) or not has_forecast):
             print("\n>> Solcast: fetching solar forecast ...")
             solcast = SolcastClient(api_key=solcast_key, resource_id=solcast_rid)
             solar_fc = solcast.fetch_forecasts(hours=48)
             cache.save_forecast("solcast", solar_fc)
             print(f"  Saved {len(solar_fc)} forecast intervals")
+        elif solcast_key and solcast_rid:
+            print(f"\n>> Solcast: skipped (next fetch at {'6am' if hour < 6 else '12pm' if hour < 12 else '6am tomorrow'})")
         else:
             print("\n>> Solcast: skipped (SOLCAST_API_KEY / SOLCAST_RESOURCE_ID not set)")
 
