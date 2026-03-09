@@ -25,14 +25,13 @@ def _simulate_soc(
     Both solar and load should be in kW, indexed by datetime at regular intervals.
     Returns SoC as percentage (0-100).
     """
-    # Align and fill gaps
+    # Resample both to 30-min intervals and align
     combined = pd.DataFrame({"solar": solar, "load": load}).sort_index()
-    combined = combined.ffill().fillna(0)
+    combined = combined.resample("30min").mean().ffill().fillna(0)
 
-    # Interval in hours (detect from index)
     if len(combined) < 2:
         return pd.Series(dtype=float)
-    dt_hours = (combined.index[1] - combined.index[0]).total_seconds() / 3600
+    dt_hours = 0.5  # 30-min intervals
 
     soc_kwh = start_soc_pct / 100 * capacity_kwh
     soc_vals = []
@@ -92,9 +91,13 @@ def build_forecast_dashboard(
     current_soc = soc_actual.iloc[-1] if not soc_actual.empty else 50.0
 
     soc_forecast = pd.Series(dtype=float)
+    soc_forecast_10 = pd.Series(dtype=float)
+    soc_forecast_90 = pd.Series(dtype=float)
     if not solar_forecast.empty and not load_forecast.empty:
-        sf_idx = solar_forecast.set_index("dt")["pv_estimate"]
-        soc_forecast = _simulate_soc(sf_idx, load_forecast, current_soc)
+        sf = solar_forecast.set_index("dt")
+        soc_forecast = _simulate_soc(sf["pv_estimate"], load_forecast, current_soc)
+        soc_forecast_10 = _simulate_soc(sf["pv_estimate10"], load_forecast, current_soc)
+        soc_forecast_90 = _simulate_soc(sf["pv_estimate90"], load_forecast, current_soc)
 
     # ------------------------------------------------------------------
     # Build figure — 4 rows: SoC, Price, Solar, Load
@@ -123,6 +126,26 @@ def build_forecast_dashboard(
         )
 
     if not soc_forecast.empty:
+        # p10–p90 confidence band
+        if not soc_forecast_90.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=soc_forecast_90.index, y=soc_forecast_90.values,
+                    mode="lines", line=dict(width=0),
+                    showlegend=False, hoverinfo="skip",
+                ),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=soc_forecast_10.index, y=soc_forecast_10.values,
+                    mode="lines", line=dict(width=0),
+                    fill="tonexty", fillcolor="rgba(6, 214, 160, 0.15)",
+                    name="SoC range",
+                    hoverinfo="skip",
+                ),
+                row=1, col=1,
+            )
         fig.add_trace(
             go.Scatter(
                 x=soc_forecast.index, y=soc_forecast.values,

@@ -154,9 +154,9 @@ def _parse_price_forecast(records: list[dict]) -> pd.DataFrame:
         rows.append({
             "dt": dt,
             "type": r["type"],
-            "price_forecast": float(r.get("spotPerKwh", 0)),
-            "price_low": float(adv.get("low", r.get("spotPerKwh", 0))),
-            "price_high": float(adv.get("high", r.get("spotPerKwh", 0))),
+            "price_forecast": float(adv.get("predicted", r.get("perKwh", 0))),
+            "price_low": float(adv.get("low", r.get("perKwh", 0))),
+            "price_high": float(adv.get("high", r.get("perKwh", 0))),
             "descriptor": r.get("descriptor", ""),
             "renewables": float(r.get("renewables", 0)),
         })
